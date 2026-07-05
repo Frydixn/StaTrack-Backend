@@ -7,7 +7,10 @@ from slowapi.middleware import SlowAPIMiddleware
 from supabase import create_client, Client
 import httpx
 import os
+from dotenv import load_dotenv
 
+# Cargar variables de entorno desde .env
+load_dotenv()
 
 # ── Configuración ──────────────────────────────────────────────
 HENRIK_API_KEY = os.getenv("HENRIK_API_KEY", "")
