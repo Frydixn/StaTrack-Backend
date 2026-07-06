@@ -39,6 +39,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         FRONTEND_URL,
+        "https://valoquest.onrender.com",
         "http://localhost:5173",
         "http://localhost:4173",
     ],
@@ -222,3 +223,15 @@ async def upsert_achievements(request: Request):
         .upsert(body, on_conflict="puuid,achievement_id") \
         .execute()
     return result.data
+
+@app.get("/api/db/pros")
+@limiter.limit("20/minute")
+async def get_pros(request: Request):
+    if not supabase_client:
+        raise HTTPException(500, "Supabase no configurado")
+    result = supabase_client.table("pro_players") \
+        .select("*") \
+        .eq("active", True) \
+        .order("display_name") \
+        .execute()
+    return result.data or []
