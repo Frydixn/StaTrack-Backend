@@ -5,6 +5,8 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from supabase import create_client, Client
+from supabase.lib.client_options import ClientOptions
+
 import httpx
 import os
 from dotenv import load_dotenv
@@ -20,9 +22,18 @@ HENRIK_HEADERS = {"Authorization": HENRIK_API_KEY} if HENRIK_API_KEY else {}
 SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
-
-supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY) \
-    if SUPABASE_URL and SUPABASE_SERVICE_KEY else None
+supabase_client: Client = (
+    create_client(
+        SUPABASE_URL,
+        SUPABASE_SERVICE_KEY,
+        options=ClientOptions(
+            auto_refresh_token=False,
+            persist_session=False,
+        )
+    )
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY
+    else None
+)
 
 
 VALID_REGIONS = {"eu", "na", "ap", "kr", "latam", "br"}
