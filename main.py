@@ -248,3 +248,14 @@ async def get_pros(request: Request):
         "order":  "display_name.asc",
     })
     return rows
+
+@app.get("/api/db/players/suggest")
+@limiter.limit("30/minute")
+async def suggest_players(request: Request, q: str = ""):
+    if not q:
+        return []
+    rows = await sb_get("players", {
+        "name": f"ilike.%{q}%",
+        "limit": "10",
+    })
+    return rows
