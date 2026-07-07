@@ -155,9 +155,9 @@ async def get_player(request: Request, name: str, tag: str):
             .select("*") \
             .ilike("name", name) \
             .ilike("tag", tag) \
-            .maybe_single() \
             .execute()
-        return result.data or {}
+        rows = result.data or []
+        return rows[0] if rows else {}
     except Exception as e:
         raise HTTPException(500, f"Error leyendo jugador: {str(e)}")
 
@@ -216,9 +216,9 @@ async def get_stats(request: Request, puuid: str):
             .eq("puuid", puuid) \
             .order("created_at", desc=True) \
             .limit(1) \
-            .maybe_single() \
             .execute()
-        return result.data or {}
+        rows = result.data or []
+        return rows[0] if rows else {}
     except Exception as e:
         raise HTTPException(500, f"Error leyendo stats: {str(e)}")
 
