@@ -2,44 +2,61 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from supabase import create_client, Client
-from supabase.lib.client_options import ClientOptions
-
 import httpx
 import os
 from dotenv import load_dotenv
 
-# Cargar variables de entorno desde .env
 load_dotenv()
 
 # ── Configuración ──────────────────────────────────────────────
-HENRIK_API_KEY = os.getenv("HENRIK_API_KEY", "")
-FRONTEND_URL   = os.getenv("FRONTEND_URL", "http://localhost:5173")
-HENRIK_BASE    = "https://api.henrikdev.xyz"
-HENRIK_HEADERS = {"Authorization": HENRIK_API_KEY} if HENRIK_API_KEY else {}
-SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
+HENRIK_API_KEY       = os.getenv("HENRIK_API_KEY", "")
+FRONTEND_URL         = os.getenv("FRONTEND_URL", "http://localhost:5173")
+HENRIK_BASE          = "https://api.henrikdev.xyz"
+HENRIK_HEADERS       = {"Authorization": HENRIK_API_KEY} if HENRIK_API_KEY else {}
+SUPABASE_URL         = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+VALID_REGIONS        = {"eu", "na", "ap", "kr", "latam", "br"}
 
-from supabase import create_client, Client
-from supabase.lib.client_options import ClientOptions
+# Headers para llamadas directas a Supabase REST API
+# Usando service_role bypasea RLS completamente
+SUPABASE_HEADERS = {
+    "apikey":        SUPABASE_SERVICE_KEY,
+    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    "Content-Type":  "application/json",
+    "Prefer":        "return=representation",
+}
 
-supabase_client: Client = None
+# ── Helpers de Supabase via HTTP directo ───────────────────────
+async def sb_get(table: str, params: dict = {}) -> list:
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(url, headers=SUPABASE_HEADERS, params=params)
+        if r.status_code not in (200, 206):
+            raise HTTPException(500, f"Supabase error {r.status_code}: {r.text[:200]}")
+        return r.json()
 
-if SUPABASE_URL and SUPABASE_SERVICE_KEY:
-    supabase_client = create_client(
-        SUPABASE_URL,
-        SUPABASE_SERVICE_KEY,
-        options=ClientOptions(
-            auto_refresh_token=False,
-            persist_session=False,
-        )
-    )
-    supabase_client.postgrest.auth(SUPABASE_SERVICE_KEY)
+async def sb_upsert(table: str, body, on_conflict: str = "") -> list:
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {**SUPABASE_HEADERS}
+    if on_conflict:
+        headers["Prefer"] = f"return=representation,resolution=merge-duplicates"
+    params = {}
+    if on_conflict:
+        params["on_conflict"] = on_conflict
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post(url, headers=headers, json=body, params=params)
+        if r.status_code not in (200, 201):
+            raise HTTPException(500, f"Supabase error {r.status_code}: {r.text[:200]}")
+        return r.json()
 
-
-VALID_REGIONS = {"eu", "na", "ap", "kr", "latam", "br"}
+async def sb_insert(table: str, body) -> list:
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post(url, headers=SUPABASE_HEADERS, json=body)
+        if r.status_code not in (200, 201):
+            raise HTTPException(500, f"Supabase error {r.status_code}: {r.text[:200]}")
+        return r.json()
 
 # ── Rate limiting ──────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -48,11 +65,11 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 app = FastAPI(title="ValoQuest API Proxy", docs_url=None, redoc_url=None)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://valoquest.onrender.com",
+        FRONTEND_URL,
         "http://localhost:5173",
         "http://localhost:4173",
     ],
@@ -61,19 +78,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.options("/{rest_of_path:path}")
+async def preflight(request: Request, rest_of_path: str = ""):
+    origin = request.headers.get("origin", "")
+    resp = Response(status_code=200)
+    resp.headers["Access-Control-Allow-Origin"]  = origin
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "*"
+    resp.headers["Access-Control-Max-Age"]       = "600"
+    return resp
 
-@app.middleware("http")
-async def db_preflight_middleware(request: Request, call_next):
-    if request.method == "OPTIONS":
-        response = Response(status_code=200)
-        origin = request.headers.get("origin", "*")
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        return response
-    return await call_next(request)
-
-# ── Helper ─────────────────────────────────────────────────────
+# ── Helper HenrikDev ───────────────────────────────────────────
 async def henrik_get(endpoint: str, params: dict = {}):
     async with httpx.AsyncClient(timeout=15.0) as client:
         r = await client.get(
@@ -82,23 +97,24 @@ async def henrik_get(endpoint: str, params: dict = {}):
             params=params,
         )
         if r.status_code == 404:
-            raise HTTPException(404, "Jugador no encontrado. Revisá el Riot ID.")
+            raise HTTPException(404, "Jugador no encontrado.")
         if r.status_code == 429:
-            raise HTTPException(429, "Límite de la API alcanzado. Intentá en un momento.")
+            raise HTTPException(429, "Límite de API alcanzado.")
         if r.status_code != 200:
-            raise HTTPException(r.status_code, f"Error de HenrikDev: {r.text[:200]}")
+            raise HTTPException(r.status_code, f"Error HenrikDev: {r.text[:200]}")
         return r.json()
 
 def validate_region(region: str):
     if region.lower() not in VALID_REGIONS:
-        raise HTTPException(400, f"Región inválida. Válidas: {', '.join(VALID_REGIONS)}")
+        raise HTTPException(400, f"Región inválida: {region}")
 
-# ── Endpoints ──────────────────────────────────────────────────
+# ── Endpoints HenrikDev ────────────────────────────────────────
 @app.get("/api/health")
 async def health():
     return {
         "status": "ok",
-        "henrik_configured": bool(HENRIK_API_KEY),
+        "henrik_configured":   bool(HENRIK_API_KEY),
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
     }
 
 @app.get("/api/account/{name}/{tag}")
@@ -119,18 +135,13 @@ async def get_mmr_history(request: Request, region: str, name: str, tag: str):
     try:
         return await henrik_get(f"/valorant/v1/mmr-history/{region}/{name}/{tag}")
     except HTTPException:
-        return {"data": []}   # silencioso si falla
+        return {"data": []}
 
 @app.get("/api/matches/{region}/{name}/{tag}")
 @limiter.limit("10/minute")
 async def get_matches(
-    request: Request,
-    region: str,
-    name: str,
-    tag: str,
-    size: int = 20,
-    page: int = 1,
-    mode: str = "competitive",
+    request: Request, region: str, name: str, tag: str,
+    size: int = 20, page: int = 1, mode: str = "competitive",
 ):
     validate_region(region)
     size = max(1, min(size, 20))
@@ -143,138 +154,81 @@ async def get_matches(
         params={"size": size, "page": page, "mode": mode},
     )
 
-# ── Endpoints de Supabase ──────────────────────────────────────
-
+# ── Endpoints Supabase (HTTP directo, bypasea RLS con service_role) ──
 @app.get("/api/db/player/{name}/{tag}")
 @limiter.limit("20/minute")
 async def get_player(request: Request, name: str, tag: str):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        result = supabase_client.table("players") \
-            .select("*") \
-            .ilike("name", name) \
-            .ilike("tag", tag) \
-            .execute()
-        rows = result.data or []
-        return rows[0] if rows else {}
-    except Exception as e:
-        raise HTTPException(500, f"Error leyendo jugador: {str(e)}")
+    rows = await sb_get("players", {
+        "name": f"ilike.{name}",
+        "tag":  f"ilike.{tag}",
+        "limit": "1",
+    })
+    return rows[0] if rows else {}
 
 @app.post("/api/db/player")
 @limiter.limit("20/minute")
 async def upsert_player(request: Request):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        body = await request.json()
-        allowed = {"puuid","name","tag","region","account_level","last_updated"}
-        filtered = {k: v for k, v in body.items() if k in allowed}
-        result = supabase_client.table("players") \
-            .upsert(filtered, on_conflict="puuid") \
-            .execute()
-        return result.data
-    except Exception as e:
-        raise HTTPException(500, f"Error guardando jugador: {str(e)}")
+    body = await request.json()
+    allowed = {"puuid","name","tag","region","account_level","last_updated"}
+    filtered = {k: v for k, v in body.items() if k in allowed}
+    result = await sb_upsert("players", filtered, on_conflict="puuid")
+    return result
 
 @app.get("/api/db/matches/{puuid}")
 @limiter.limit("20/minute")
 async def get_matches_db(request: Request, puuid: str):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        result = supabase_client.table("player_matches") \
-            .select("match_id, match_data") \
-            .eq("puuid", puuid) \
-            .execute()
-        return result.data or []
-    except Exception as e:
-        raise HTTPException(500, f"Error leyendo partidas: {str(e)}")
+    rows = await sb_get("player_matches", {
+        "puuid":  f"eq.{puuid}",
+        "select": "match_id,match_data",
+    })
+    return rows
 
 @app.post("/api/db/matches")
 @limiter.limit("20/minute")
 async def upsert_matches(request: Request):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        body = await request.json()
-        result = supabase_client.table("player_matches") \
-            .upsert(body, on_conflict="puuid,match_id") \
-            .execute()
-        return result.data
-    except Exception as e:
-        raise HTTPException(500, f"Error guardando partidas: {str(e)}")
+    body = await request.json()
+    result = await sb_upsert("player_matches", body, on_conflict="puuid,match_id")
+    return result
 
 @app.get("/api/db/stats/{puuid}")
 @limiter.limit("20/minute")
 async def get_stats(request: Request, puuid: str):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        result = supabase_client.table("player_stats_snapshots") \
-            .select("stats, created_at") \
-            .eq("puuid", puuid) \
-            .order("created_at", desc=True) \
-            .limit(1) \
-            .execute()
-        rows = result.data or []
-        return rows[0] if rows else {}
-    except Exception as e:
-        raise HTTPException(500, f"Error leyendo stats: {str(e)}")
+    rows = await sb_get("player_stats_snapshots", {
+        "puuid":  f"eq.{puuid}",
+        "select": "stats,created_at",
+        "order":  "created_at.desc",
+        "limit":  "1",
+    })
+    return rows[0] if rows else {}
 
 @app.post("/api/db/stats")
 @limiter.limit("20/minute")
 async def upsert_stats(request: Request):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        body = await request.json()
-        result = supabase_client.table("player_stats_snapshots") \
-            .insert(body) \
-            .execute()
-        return result.data
-    except Exception as e:
-        raise HTTPException(500, f"Error guardando stats: {str(e)}")
+    body = await request.json()
+    result = await sb_insert("player_stats_snapshots", body)
+    return result
 
 @app.get("/api/db/achievements/{puuid}")
 @limiter.limit("20/minute")
 async def get_achievements(request: Request, puuid: str):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        result = supabase_client.table("player_achievements") \
-            .select("achievement_id, unlocked_at") \
-            .eq("puuid", puuid) \
-            .execute()
-        return result.data or []
-    except Exception as e:
-        raise HTTPException(500, f"Error leyendo logros: {str(e)}")
+    rows = await sb_get("player_achievements", {
+        "puuid":  f"eq.{puuid}",
+        "select": "achievement_id,unlocked_at",
+    })
+    return rows
 
 @app.post("/api/db/achievements")
 @limiter.limit("20/minute")
 async def upsert_achievements(request: Request):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        body = await request.json()
-        result = supabase_client.table("player_achievements") \
-            .upsert(body, on_conflict="puuid,achievement_id") \
-            .execute()
-        return result.data
-    except Exception as e:
-        raise HTTPException(500, f"Error guardando logros: {str(e)}")
+    body = await request.json()
+    result = await sb_upsert("player_achievements", body, on_conflict="puuid,achievement_id")
+    return result
 
 @app.get("/api/db/pros")
 @limiter.limit("20/minute")
 async def get_pros(request: Request):
-    if not supabase_client:
-        raise HTTPException(500, "Supabase no configurado")
-    try:
-        result = supabase_client.table("pro_players") \
-            .select("*") \
-            .eq("active", True) \
-            .order("display_name") \
-            .execute()
-        return result.data or []
-    except Exception as e:
-        raise HTTPException(500, f"Error leyendo pros: {str(e)}")
+    rows = await sb_get("pro_players", {
+        "active": "eq.true",
+        "order":  "display_name.asc",
+    })
+    return rows
