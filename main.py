@@ -40,11 +40,11 @@ async def sb_upsert(table: str, body, on_conflict: str = "") -> list:
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     headers = {**SUPABASE_HEADERS}
     if on_conflict:
-        headers["Prefer"] = f"return=representation,resolution=merge-duplicates"
+        headers["Prefer"] = "return=representation,resolution=merge-duplicates"
     params = {}
     if on_conflict:
         params["on_conflict"] = on_conflict
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(url, headers=headers, json=body, params=params)
         if r.status_code not in (200, 201):
             raise HTTPException(500, f"Supabase error {r.status_code}: {r.text[:200]}")
@@ -187,8 +187,24 @@ async def get_matches_db(request: Request, puuid: str):
 @limiter.limit("20/minute")
 async def upsert_matches(request: Request):
     body = await request.json()
-    result = await sb_upsert("player_matches", body, on_conflict="puuid,match_id")
-    return result
+    if not body:
+        return []
+    
+    # Enviar en lotes de 10 para no saturar Supabase
+    batch_size = 10
+    all_results = []
+    for i in range(0, len(body), batch_size):
+        batch = body[i:i + batch_size]
+        try:
+            result = await sb_upsert("player_matches", batch, on_conflict="puuid,match_id")
+            if isinstance(result, list):
+                all_results.extend(result)
+        except Exception as e:
+            # Si un lote falla, continuar con el siguiente
+            print(f"Error en lote {i}: {str(e)}")
+            continue
+    
+    return all_results
 
 @app.get("/api/db/stats/{puuid}")
 @limiter.limit("20/minute")
