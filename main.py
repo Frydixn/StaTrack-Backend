@@ -22,8 +22,13 @@ HENRIK_HEADERS = {"Authorization": HENRIK_API_KEY} if HENRIK_API_KEY else {}
 SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
-supabase_client: Client = (
-    create_client(
+from supabase import create_client, Client
+from supabase.lib.client_options import ClientOptions
+
+supabase_client: Client = None
+
+if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+    supabase_client = create_client(
         SUPABASE_URL,
         SUPABASE_SERVICE_KEY,
         options=ClientOptions(
@@ -31,9 +36,7 @@ supabase_client: Client = (
             persist_session=False,
         )
     )
-    if SUPABASE_URL and SUPABASE_SERVICE_KEY
-    else None
-)
+    supabase_client.postgrest.auth(SUPABASE_SERVICE_KEY)
 
 
 VALID_REGIONS = {"eu", "na", "ap", "kr", "latam", "br"}
@@ -49,12 +52,12 @@ app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        FRONTEND_URL,
         "https://valoquest.onrender.com",
         "http://localhost:5173",
         "http://localhost:4173",
     ],
-    allow_methods=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -147,102 +150,131 @@ async def get_matches(
 async def get_player(request: Request, name: str, tag: str):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    result = supabase_client.table("players") \
-        .select("*") \
-        .ilike("name", name) \
-        .ilike("tag", tag) \
-        .maybe_single() \
-        .execute()
-    return result.data or {}
+    try:
+        result = supabase_client.table("players") \
+            .select("*") \
+            .ilike("name", name) \
+            .ilike("tag", tag) \
+            .maybe_single() \
+            .execute()
+        return result.data or {}
+    except Exception as e:
+        raise HTTPException(500, f"Error leyendo jugador: {str(e)}")
 
 @app.post("/api/db/player")
 @limiter.limit("20/minute")
 async def upsert_player(request: Request):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    body = await request.json()
-    result = supabase_client.table("players") \
-        .upsert(body) \
-        .execute()
-    return result.data
+    try:
+        body = await request.json()
+        allowed = {"puuid","name","tag","region","account_level","last_updated"}
+        filtered = {k: v for k, v in body.items() if k in allowed}
+        result = supabase_client.table("players") \
+            .upsert(filtered, on_conflict="puuid") \
+            .execute()
+        return result.data
+    except Exception as e:
+        raise HTTPException(500, f"Error guardando jugador: {str(e)}")
 
 @app.get("/api/db/matches/{puuid}")
 @limiter.limit("20/minute")
 async def get_matches_db(request: Request, puuid: str):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    result = supabase_client.table("player_matches") \
-        .select("match_id, match_data") \
-        .eq("puuid", puuid) \
-        .execute()
-    return result.data or []
+    try:
+        result = supabase_client.table("player_matches") \
+            .select("match_id, match_data") \
+            .eq("puuid", puuid) \
+            .execute()
+        return result.data or []
+    except Exception as e:
+        raise HTTPException(500, f"Error leyendo partidas: {str(e)}")
 
 @app.post("/api/db/matches")
 @limiter.limit("20/minute")
 async def upsert_matches(request: Request):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    body = await request.json()  # lista de { puuid, match_id, match_data }
-    result = supabase_client.table("player_matches") \
-        .upsert(body, on_conflict="puuid,match_id") \
-        .execute()
-    return result.data
+    try:
+        body = await request.json()
+        result = supabase_client.table("player_matches") \
+            .upsert(body, on_conflict="puuid,match_id") \
+            .execute()
+        return result.data
+    except Exception as e:
+        raise HTTPException(500, f"Error guardando partidas: {str(e)}")
 
 @app.get("/api/db/stats/{puuid}")
 @limiter.limit("20/minute")
 async def get_stats(request: Request, puuid: str):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    result = supabase_client.table("player_stats_snapshots") \
-        .select("stats, created_at") \
-        .eq("puuid", puuid) \
-        .order("created_at", desc=True) \
-        .limit(1) \
-        .maybe_single() \
-        .execute()
-    return result.data or {}
+    try:
+        result = supabase_client.table("player_stats_snapshots") \
+            .select("stats, created_at") \
+            .eq("puuid", puuid) \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .maybe_single() \
+            .execute()
+        return result.data or {}
+    except Exception as e:
+        raise HTTPException(500, f"Error leyendo stats: {str(e)}")
 
 @app.post("/api/db/stats")
 @limiter.limit("20/minute")
 async def upsert_stats(request: Request):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    body = await request.json()
-    result = supabase_client.table("player_stats_snapshots") \
-        .insert(body) \
-        .execute()
-    return result.data
+    try:
+        body = await request.json()
+        result = supabase_client.table("player_stats_snapshots") \
+            .insert(body) \
+            .execute()
+        return result.data
+    except Exception as e:
+        raise HTTPException(500, f"Error guardando stats: {str(e)}")
 
 @app.get("/api/db/achievements/{puuid}")
 @limiter.limit("20/minute")
 async def get_achievements(request: Request, puuid: str):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    result = supabase_client.table("player_achievements") \
-        .select("achievement_id, unlocked_at") \
-        .eq("puuid", puuid) \
-        .execute()
-    return result.data or []
+    try:
+        result = supabase_client.table("player_achievements") \
+            .select("achievement_id, unlocked_at") \
+            .eq("puuid", puuid) \
+            .execute()
+        return result.data or []
+    except Exception as e:
+        raise HTTPException(500, f"Error leyendo logros: {str(e)}")
 
 @app.post("/api/db/achievements")
 @limiter.limit("20/minute")
 async def upsert_achievements(request: Request):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    body = await request.json()  # lista de { puuid, achievement_id }
-    result = supabase_client.table("player_achievements") \
-        .upsert(body, on_conflict="puuid,achievement_id") \
-        .execute()
-    return result.data
+    try:
+        body = await request.json()
+        result = supabase_client.table("player_achievements") \
+            .upsert(body, on_conflict="puuid,achievement_id") \
+            .execute()
+        return result.data
+    except Exception as e:
+        raise HTTPException(500, f"Error guardando logros: {str(e)}")
 
 @app.get("/api/db/pros")
 @limiter.limit("20/minute")
 async def get_pros(request: Request):
     if not supabase_client:
         raise HTTPException(500, "Supabase no configurado")
-    result = supabase_client.table("pro_players") \
-        .select("*") \
-        .eq("active", True) \
-        .order("display_name") \
-        .execute()
-    return result.data or []
+    try:
+        result = supabase_client.table("pro_players") \
+            .select("*") \
+            .eq("active", True) \
+            .order("display_name") \
+            .execute()
+        return result.data or []
+    except Exception as e:
+        raise HTTPException(500, f"Error leyendo pros: {str(e)}")
