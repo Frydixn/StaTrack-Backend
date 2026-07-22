@@ -190,21 +190,49 @@ async def upsert_matches(request: Request):
     if not body:
         return []
     
-    # Enviar en lotes de 10 para no saturar Supabase
-    batch_size = 10
-    all_results = []
-    for i in range(0, len(body), batch_size):
-        batch = body[i:i + batch_size]
+    # Limitar a 20 partidas por request para no saturar RAM
+    body = body[:20]
+    
+    # Reducir match_data solo a los campos necesarios
+    def slim_match(row):
+        md = row.get("match_data", {})
+        meta = md.get("metadata", {})
+        players = md.get("players", {})
+        return {
+            "puuid": row["puuid"],
+            "match_id": row["match_id"],
+            "match_data": {
+                "metadata": {
+                    "map": meta.get("map"),
+                    "mode": meta.get("mode"),
+                    "matchid": meta.get("matchid"),
+                    "game_start": meta.get("game_start"),
+                    "season_id": meta.get("season_id"),
+                    "rounds_played": meta.get("rounds_played"),
+                },
+                "players": players,
+                "teams": md.get("teams", {}),
+                "kills": md.get("kills", []),
+                "rounds": md.get("rounds", []),
+            }
+        }
+    
+    slimmed = [slim_match(r) for r in body]
+    
+    # Procesar en lotes de 5
+    results = []
+    for i in range(0, len(slimmed), 5):
+        batch = slimmed[i:i+5]
         try:
             result = await sb_upsert("player_matches", batch, on_conflict="puuid,match_id")
             if isinstance(result, list):
-                all_results.extend(result)
+                results.extend(result)
         except Exception as e:
-            # Si un lote falla, continuar con el siguiente
             print(f"Error en lote {i}: {str(e)}")
             continue
-    
-    return all_results
+            
+    return results
+
 
 @app.get("/api/db/stats/{puuid}")
 @limiter.limit("20/minute")
